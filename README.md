@@ -21,9 +21,10 @@ Coleta os comentários do **GitHub Copilot Review** dos seus últimos PRs e envi
 ```bash
 git clone https://github.com/tauk7/pr-review-insights
 cd pr-review-insights
+python3 -m venv .venv
+source .venv/bin/activate
+pip install anthropic
 ```
-
-O pacote `anthropic` é instalado automaticamente na primeira execução.
 
 ## Uso
 
