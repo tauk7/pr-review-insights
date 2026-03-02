@@ -1,0 +1,4 @@
+.env
+pr-insights/
+__pycache__/
+*.pyc
