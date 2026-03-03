@@ -18,7 +18,7 @@ Não precisa de GitHub Copilot — funciona com qualquer reviewer (humano ou bot
 
 ## Pré-requisitos
 
-- Python 3.8+
+- Node.js 22+
 - [gh CLI](https://cli.github.com/) autenticado (`gh auth login`)
 - Chave de API de **um** dos providers abaixo
 
@@ -30,11 +30,12 @@ Não precisa de GitHub Copilot — funciona com qualquer reviewer (humano ou bot
 | **Gemini** | gemini-2.5-pro | `GEMINI_API_KEY` | Gratuito ([AI Studio](https://aistudio.google.com)) |
 | **DeepSeek** | deepseek-chat (V3) | `DEEPSEEK_API_KEY` | Gratuito ([platform.deepseek.com](https://platform.deepseek.com)) |
 
-As dependências Python são instaladas automaticamente na primeira execução.
-
 ## Uso
 
 ```bash
+# Instale as dependências (primeira vez)
+npm install
+
 # Exporte a chave do provider que vai usar
 export GEMINI_API_KEY='AIza...'
 # ou
@@ -42,7 +43,7 @@ export DEEPSEEK_API_KEY='sk-...'
 # ou
 export ANTHROPIC_API_KEY='sk-ant-...'
 
-python3 pr-review-insights.py
+node pr-review-insights.mjs
 ```
 
 O script pergunta qual provider usar e mostra quais chaves estão configuradas.
