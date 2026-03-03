@@ -215,20 +215,24 @@ Com base em tudo que viu:
 - Dicas práticas e acionáveis para os próximos PRs
 - O que estudar (específico: conceito, recurso, capítulo de livro — sem genéricos)
 
-## 4. Principais contribuições
-Liste as contribuições mais relevantes encontradas nos PRs, no formato:
-"[Verbo de ação] [o que foi feito] em [contexto/sistema], gerando [impacto ou resultado]"
+## 4. Principais contribuições (formato XYZ para currículo/gestor)
+Use a fórmula XYZ do Google: "[Verbo] [X — resultado de negócio], [Y — métrica ou magnitude], ao [Z — ação técnica em linguagem universal]."
+
+Onde:
+- X = impacto de negócio (segurança, confiabilidade, velocidade, UX, custo) — nunca tecnologia
+- Y = métrica ou estimativa honesta ("eliminando completamente", "reduzindo significativamente") — nunca invente números
+- Z = ação técnica resumida de forma que qualquer dev entenda sem conhecer o projeto
 
 Exemplos do formato esperado:
-- "Implementei módulo de gestão de fornecedores no ERP, permitindo controle centralizado de contratos"
-- "Corrigi bug crítico no fluxo de pagamento que causava duplicação de cobranças"
-- "Refatorei camada de autenticação separando responsabilidades, reduzindo acoplamento entre módulos"
+- "Mitigei falhas críticas de acesso indevido a dados de outros usuários, reduzindo a zero os incidentes de vazamento entre contas, ao implementar validação rigorosa de propriedade nas mutations da API GraphQL."
+- "Aumentei a confiabilidade da camada de dados, eliminando bugs silenciosos que corrompiam resultados de consultas, ao reescrever a abstração de repositório que ignorava filtros aplicados."
+- "Melhorei a capacidade de resposta a incidentes em produção, reduzindo o tempo de diagnóstico de falhas, ao injetar logs estruturados com contexto de usuário em todas as requisições HTTP da API."
 
 Regras obrigatórias:
-- Só inclua se a contribuição tiver impacto real e tangível (funcionalidade nova relevante, correção crítica, melhoria arquitetural significativa)
-- Se não houver contribuições que realmente valham citar, omita a seção completamente — não force
-- Máximo de 5 itens; prefira menos e mais precisos
-- Útil para currículo e para mostrar valor ao gestor
+- Só inclua contribuições com impacto real: feature crítica, bug grave corrigido, ganho de segurança, performance relevante
+- Não mencione nomes internos de sistemas, codinomes de projetos ou tecnologias que não agregam à frase
+- Se a contribuição for pequena demais ou só fizer sentido dentro do contexto do projeto, descarte — não force
+- Máximo de 5 itens; 2 contribuições fortes valem mais que 5 genéricas
 """
 
     return f"""Você é um engenheiro sênior fazendo análise de code review. Analise os PRs abaixo com honestidade e objetividade. Responda em português.
