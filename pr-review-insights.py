@@ -21,20 +21,26 @@ import json
 import sys
 import os
 import re
+import shutil
+
+if sys.version_info < (3, 6):
+    print("Erro: Python 3.6+ necessário. Use: python3 pr-review-insights.py")
+    sys.exit(1)
 
 
 # ─── Instalação automática de dependências ────────────────────────────────────
 
 def pip_install(pkg):
-    subprocess.run(
-        [sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"],
-        check=True,
-    )
+    cmd = [sys.executable, "-m", "pip", "install", pkg, "-q"]
+    if sys.platform != "win32":
+        cmd.append("--break-system-packages")
+    subprocess.run(cmd, check=True)
 
 
 # ─── Helpers GitHub ──────────────────────────────────────────────────────────
 
-def gh(*args, check=True):
+def gh(*args, **kwargs):
+    check = kwargs.get("check", True)
     result = subprocess.run(["gh", *args], capture_output=True, text=True)
     if check and result.returncode != 0:
         print(f"\nErro: gh {' '.join(args)}\n{result.stderr.strip()}", file=sys.stderr)
@@ -324,7 +330,7 @@ def select_provider():
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    if subprocess.run(["which", "gh"], capture_output=True).returncode != 0:
+    if shutil.which("gh") is None:
         print("Erro: gh CLI não encontrado. Instale em https://cli.github.com/", file=sys.stderr)
         sys.exit(1)
 
