@@ -1,0 +1,15 @@
+{
+  "name": "pr-review-insights",
+  "version": "1.0.0",
+  "description": "Coleta comentários de code review dos seus últimos PRs e gera insights de melhoria com IA",
+  "type": "module",
+  "main": "pr-review-insights.mjs",
+  "scripts": {
+    "start": "node pr-review-insights.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/generative-ai": "^0.24.0",
+    "openai": "^4.85.0"
+  }
+}
