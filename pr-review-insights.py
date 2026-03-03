@@ -164,35 +164,39 @@ def get_pr_diff(owner, repo, number, max_lines_per_file=120, max_total_chars=90_
 
 # ─── Prompt ──────────────────────────────────────────────────────────────────
 
-def build_prompt(all_feedback):
+def build_prompt(all_feedback, mode="both"):
+    use_comments = mode in ("comments", "both")
+    use_diff     = mode in ("diff", "both")
+
     prs_text = ""
     for item in all_feedback:
         prs_text += f"\n---\n## PR `{item['owner']}/{item['repo']}#{item['number']}` — {item['title']}\n"
         prs_text += f"URL: {item['url']}\n\n"
 
-        if item["comments"]:
-            prs_text += "### Comentários de review\n\n"
-            for i, c in enumerate(item["comments"], 1):
-                loc = f"`{c['file']}`" + (f" linha {c['line']}" if c["line"] else "")
-                prs_text += f"**[{i}] @{c['author']} — {loc}**\n{c['body']}\n\n"
-        else:
-            prs_text += "_Sem comentários de review._\n\n"
+        if use_comments:
+            if item["comments"]:
+                prs_text += "### Comentários de review\n\n"
+                for i, c in enumerate(item["comments"], 1):
+                    loc = f"`{c['file']}`" + (f" linha {c['line']}" if c["line"] else "")
+                    prs_text += f"**[{i}] @{c['author']} — {loc}**\n{c['body']}\n\n"
+            else:
+                prs_text += "_Sem comentários de review._\n\n"
 
-        if item["diff"]:
+        if use_diff and item["diff"]:
             prs_text += "### Diff do PR\n\n```diff\n"
             prs_text += item["diff"]
             prs_text += "```\n\n"
 
-    return f"""Você é um engenheiro sênior fazendo análise de code review. Analise os PRs abaixo com honestidade e objetividade. Responda em português.
+    sections = ""
 
-{prs_text}
-
----
-
-## 1. Validação dos comentários de review
+    if use_comments:
+        sections += """## 1. Validação dos comentários de review
 Para cada comentário listado, classifique como **válido**, **dispensável** ou **debatível** — com explicação curta do porquê. Ignore comentários puramente de estilo sem impacto real.
 
-## 2. Code review do diff
+"""
+
+    if use_diff:
+        sections += """## 2. Code review do diff
 Revise o código alterado. Aponte **apenas** o que realmente importa:
 - Bugs reais ou potenciais
 - Problemas de segurança
@@ -201,7 +205,9 @@ Revise o código alterado. Aponte **apenas** o que realmente importa:
 
 Não comente: estilo, naming subjetivo, preferências pessoais, coisas que "poderiam ser melhores mas funcionam bem". Seja cirúrgico — se não tem nada crítico, diga isso.
 
-## 3. Padrões e insights
+"""
+
+    sections += """## 3. Padrões e insights
 Com base em tudo que viu:
 - Quais problemas se repetem? (agrupe por categoria)
 - Quais são os débitos técnicos mais críticos?
@@ -224,6 +230,14 @@ Regras obrigatórias:
 - Máximo de 5 itens; prefira menos e mais precisos
 - Útil para currículo e para mostrar valor ao gestor
 """
+
+    return f"""Você é um engenheiro sênior fazendo análise de code review. Analise os PRs abaixo com honestidade e objetividade. Responda em português.
+
+{prs_text}
+
+---
+
+{sections}"""
 
 
 # ─── Providers ───────────────────────────────────────────────────────────────
@@ -395,6 +409,26 @@ def select_provider():
         return p["fn"], api_key
 
 
+def select_mode():
+    MODES = {
+        "1": ("comments", "Comentários de reviewers  — valida o que foi apontado nas revisões"),
+        "2": ("diff",     "Review do diff pela IA    — analisa o código diretamente"),
+        "3": ("both",     "Ambos                     — comentários + review do diff"),
+    }
+    print("O que usar como base para análise?\n")
+    for key, (_, desc) in MODES.items():
+        print(f"  [{key}] {desc}")
+    print()
+
+    while True:
+        choice = input("Opção [1/2/3]: ").strip()
+        if choice in MODES:
+            mode, desc = MODES[choice]
+            print(f"✓ Modo: {desc.strip()}\n")
+            return mode
+        print("  Digite 1, 2 ou 3.")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -403,6 +437,7 @@ def main():
         sys.exit(1)
 
     run_fn, api_key = select_provider()
+    mode = select_mode()
 
     # ── Etapa 1: PRs recentes ─────────────────────────────────────────────────
     print("🔍 Buscando seus PRs recentes...")
@@ -440,13 +475,16 @@ def main():
     for pr in qualifying:
         owner, repo, number = pr["owner"], pr["repo"], pr["number"]
         print(f"   {owner}/{repo}#{number}  '{pr['title'][:50]}'")
-        comments = get_review_comments(owner, repo, number)
-        diff     = get_pr_diff(owner, repo, number)
+        comments = get_review_comments(owner, repo, number) if mode in ("comments", "both") else []
+        diff     = get_pr_diff(owner, repo, number)        if mode in ("diff",     "both") else ""
         all_feedback.append({**pr, "comments": comments, "diff": diff})
-        print(f"      → {len(comments)} comentário(s) | diff: {len(diff):,} chars")
+        parts = []
+        if comments: parts.append(f"{len(comments)} comentário(s)")
+        if diff:     parts.append(f"diff: {len(diff):,} chars")
+        print(f"      → {', '.join(parts) or 'sem dados'}")
 
     # ── Etapa 4: envia para a IA ──────────────────────────────────────────────
-    prompt = build_prompt(all_feedback)
+    prompt = build_prompt(all_feedback, mode=mode)
     total_comments = sum(len(f["comments"]) for f in all_feedback)
 
     print(f"\n{'─' * 70}")
