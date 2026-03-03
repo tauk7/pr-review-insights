@@ -9,7 +9,8 @@ e gera insights de melhoria. Funciona sem GitHub Copilot.
 Providers suportados: Claude (Anthropic), Gemini (Google), DeepSeek
 
 Uso:
-    python3 pr-review-insights.py
+    python3 pr-review-insights.py   (Linux/Mac)
+    python pr-review-insights.py    (Windows)
 
 Requisitos:
     - gh CLI autenticado (gh auth login)
@@ -27,12 +28,15 @@ if sys.version_info < (3, 6):
     print("Erro: Python 3.6+ necessário. Use: python3 pr-review-insights.py")
     sys.exit(1)
 
+_IS_WIN = sys.platform == "win32"
+_SET_CMD = "set" if _IS_WIN else "export"
+
 
 # ─── Instalação automática de dependências ────────────────────────────────────
 
 def pip_install(pkg):
     cmd = [sys.executable, "-m", "pip", "install", pkg, "-q"]
-    if sys.platform != "win32":
+    if not _IS_WIN:
         cmd.append("--break-system-packages")
     subprocess.run(cmd, check=True)
 
@@ -41,11 +45,17 @@ def pip_install(pkg):
 
 def gh(*args, **kwargs):
     check = kwargs.get("check", True)
-    result = subprocess.run(["gh", *args], capture_output=True, text=True)
+    result = subprocess.run(
+        ["gh", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     if check and result.returncode != 0:
         print(f"\nErro: gh {' '.join(args)}\n{result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
-    return result.stdout.strip()
+    return (result.stdout or "").strip()
 
 
 def get_recent_prs(limit=80):
@@ -76,7 +86,6 @@ def get_review_comments(owner, repo, number):
     """Coleta comentários de qualquer reviewer — humano ou bot."""
     comments = []
 
-    # Comentários inline nas linhas de código
     raw = gh("api", f"/repos/{owner}/{repo}/pulls/{number}/comments",
              "--paginate", check=False)
     if raw:
@@ -94,7 +103,6 @@ def get_review_comments(owner, repo, number):
         except json.JSONDecodeError:
             pass
 
-    # Corpo dos reviews (sumários)
     raw = gh("api", f"/repos/{owner}/{repo}/pulls/{number}/reviews",
              "--paginate", check=False)
     if raw:
@@ -115,7 +123,6 @@ def get_review_comments(owner, repo, number):
     return comments
 
 
-# Arquivos irrelevantes para review
 _SKIP_RE = re.compile(
     r"(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|\.lock$|"
     r"\.min\.js|\.min\.css|dist/|\.generated\.|__generated__|"
@@ -125,7 +132,6 @@ _SKIP_RE = re.compile(
 
 
 def get_pr_diff(owner, repo, number, max_lines_per_file=120, max_total_chars=90_000):
-    """Busca o diff do PR com truncagem inteligente."""
     raw = gh("pr", "diff", str(number), "--repo", f"{owner}/{repo}", check=False)
     if not raw:
         return ""
@@ -137,24 +143,19 @@ def get_pr_diff(owner, repo, number, max_lines_per_file=120, max_total_chars=90_
     for chunk in file_chunks:
         if not chunk.strip():
             continue
-
         m = re.search(r"^diff --git a/(.+?) b/", chunk, re.MULTILINE)
         filename = m.group(1) if m else ""
-
         if filename and _SKIP_RE.search(filename):
             result_parts.append(f"diff --git a/{filename} b/{filename}\n[arquivo ignorado]\n")
             continue
-
         lines = chunk.splitlines()
         if len(lines) > max_lines_per_file:
             omitted = len(lines) - max_lines_per_file
             lines = lines[:max_lines_per_file] + [f"... [{omitted} linhas omitidas]"]
-
         part = "\n".join(lines) + "\n"
         if total_chars + len(part) > max_total_chars:
             result_parts.append("\n[diff truncado — limite de tamanho atingido]\n")
             break
-
         result_parts.append(part)
         total_chars += len(part)
 
@@ -207,18 +208,78 @@ Com base em tudo que viu:
 - Onde estão as lacunas técnicas mais relevantes?
 - Dicas práticas e acionáveis para os próximos PRs
 - O que estudar (específico: conceito, recurso, capítulo de livro — sem genéricos)
+
+## 4. Principais contribuições
+Liste as contribuições mais relevantes encontradas nos PRs, no formato:
+"[Verbo de ação] [o que foi feito] em [contexto/sistema], gerando [impacto ou resultado]"
+
+Exemplos do formato esperado:
+- "Implementei módulo de gestão de fornecedores no ERP, permitindo controle centralizado de contratos"
+- "Corrigi bug crítico no fluxo de pagamento que causava duplicação de cobranças"
+- "Refatorei camada de autenticação separando responsabilidades, reduzindo acoplamento entre módulos"
+
+Regras obrigatórias:
+- Só inclua se a contribuição tiver impacto real e tangível (funcionalidade nova relevante, correção crítica, melhoria arquitetural significativa)
+- Se não houver contribuições que realmente valham citar, omita a seção completamente — não force
+- Máximo de 5 itens; prefira menos e mais precisos
+- Útil para currículo e para mostrar valor ao gestor
 """
 
 
 # ─── Providers ───────────────────────────────────────────────────────────────
 
-def run_claude(prompt, api_key):
+def _ensure_anthropic():
     try:
         import anthropic
     except ImportError:
         pip_install("anthropic")
         import anthropic
+    return anthropic
 
+
+def _ensure_genai():
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        pip_install("google-generativeai")
+        import google.generativeai as genai
+    return genai
+
+
+def _ensure_openai():
+    try:
+        from openai import OpenAI
+    except ImportError:
+        pip_install("openai")
+        from openai import OpenAI
+    return OpenAI
+
+
+def test_claude(api_key):
+    anthropic = _ensure_anthropic()
+    anthropic.Anthropic(api_key=api_key).messages.create(
+        model="claude-haiku-4-5-20251001", max_tokens=5,
+        messages=[{"role": "user", "content": "ping"}],
+    )
+
+
+def test_gemini(api_key):
+    genai = _ensure_genai()
+    genai.configure(api_key=api_key)
+    genai.GenerativeModel("gemini-2.5-flash").generate_content("ping")
+
+
+def test_deepseek(api_key):
+    OpenAI = _ensure_openai()
+    OpenAI(api_key=api_key, base_url="https://api.deepseek.com").chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": "ping"}],
+        max_tokens=5,
+    )
+
+
+def run_claude(prompt, api_key):
+    anthropic = _ensure_anthropic()
     client = anthropic.Anthropic(api_key=api_key)
     chunks = []
     with client.messages.stream(
@@ -233,15 +294,10 @@ def run_claude(prompt, api_key):
 
 
 def run_gemini(prompt, api_key):
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        pip_install("google-generativeai")
-        import google.generativeai as genai
-
+    genai = _ensure_genai()
     genai.configure(api_key=api_key)
 
-    for model_name in ("gemini-2.5-pro-preview-03-25", "gemini-2.5-pro", "gemini-1.5-pro"):
+    for model_name in ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-pro"):
         try:
             model = genai.GenerativeModel(model_name)
             print(f"   Modelo: {model_name}\n")
@@ -260,12 +316,7 @@ def run_gemini(prompt, api_key):
 
 
 def run_deepseek(prompt, api_key):
-    try:
-        from openai import OpenAI
-    except ImportError:
-        pip_install("openai")
-        from openai import OpenAI
-
+    OpenAI = _ensure_openai()
     client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
     chunks = []
     stream = client.chat.completions.create(
@@ -285,22 +336,25 @@ def run_deepseek(prompt, api_key):
 
 PROVIDERS = {
     "1": {
-        "name": "Claude Opus  (Anthropic)",
-        "env":  "ANTHROPIC_API_KEY",
-        "fn":   run_claude,
-        "hint": "export ANTHROPIC_API_KEY='sk-ant-...'  # console.anthropic.com",
+        "name":    "Claude Opus  (Anthropic)",
+        "env":     "ANTHROPIC_API_KEY",
+        "fn":      run_claude,
+        "test_fn": test_claude,
+        "hint":    f"{_SET_CMD} ANTHROPIC_API_KEY=sk-ant-...   # console.anthropic.com",
     },
     "2": {
-        "name": "Gemini 2.5 Pro  (Google AI Studio — gratuito)",
-        "env":  "GEMINI_API_KEY",
-        "fn":   run_gemini,
-        "hint": "export GEMINI_API_KEY='AIza...'  # aistudio.google.com",
+        "name":    "Gemini  (Google AI Studio — gratuito)",
+        "env":     "GEMINI_API_KEY",
+        "fn":      run_gemini,
+        "test_fn": test_gemini,
+        "hint":    f"{_SET_CMD} GEMINI_API_KEY=AIza...   # aistudio.google.com",
     },
     "3": {
-        "name": "DeepSeek V3  (DeepSeek — gratuito)",
-        "env":  "DEEPSEEK_API_KEY",
-        "fn":   run_deepseek,
-        "hint": "export DEEPSEEK_API_KEY='sk-...'  # platform.deepseek.com",
+        "name":    "DeepSeek V3  (DeepSeek — gratuito)",
+        "env":     "DEEPSEEK_API_KEY",
+        "fn":      run_deepseek,
+        "test_fn": test_deepseek,
+        "hint":    f"{_SET_CMD} DEEPSEEK_API_KEY=sk-...   # platform.deepseek.com",
     },
 }
 
@@ -315,16 +369,30 @@ def select_provider():
 
     while True:
         choice = input("Opção [1/2/3]: ").strip()
-        if choice in PROVIDERS:
-            p = PROVIDERS[choice]
-            api_key = os.environ.get(p["env"])
-            if not api_key:
-                print(f"\n✗ {p['env']} não encontrada.")
-                print(f"  {p['hint']}\n")
-                sys.exit(1)
-            print(f"\n✓ Usando: {p['name']}\n")
-            return p["fn"], api_key
-        print("  Digite 1, 2 ou 3.")
+        if choice not in PROVIDERS:
+            print("  Digite 1, 2 ou 3.")
+            continue
+
+        p = PROVIDERS[choice]
+        api_key = os.environ.get(p["env"])
+        if not api_key:
+            print(f"\n✗ {p['env']} não encontrada.")
+            print(f"  {p['hint']}\n")
+            sys.exit(1)
+
+        # Testa a chave antes de começar
+        print(f"   Testando conexão com {p['name']}...")
+        try:
+            p["test_fn"](api_key)
+            print(f"   ✓ API key válida ({len(api_key)} chars)\n")
+        except Exception as e:
+            print(f"\n✗ Falha ao autenticar com {p['name']}")
+            print(f"  Chave configurada: {len(api_key)} caracteres")
+            print(f"  Erro: {e}\n")
+            sys.exit(1)
+
+        print(f"✓ Usando: {p['name']}\n")
+        return p["fn"], api_key
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -393,7 +461,7 @@ def main():
     from datetime import datetime
     output_dir = os.path.expanduser("~/pr-insights")
     os.makedirs(output_dir, exist_ok=True)
-    timestamp  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp   = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_path = os.path.join(output_dir, f"insights_{timestamp}.md")
 
     with open(output_path, "w", encoding="utf-8") as f:
