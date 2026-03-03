@@ -3,35 +3,33 @@
 """
 pr-review-insights.py
 
-Coleta comentários do GitHub Copilot Review dos seus últimos PRs
-(com >3 arquivos alterados) e envia para o Claude analisar seus
-padrões de código, débitos técnicos e o que estudar.
+Coleta comentários de code review dos seus últimos PRs, faz review do diff
+e gera insights de melhoria. Funciona sem GitHub Copilot.
+
+Providers suportados: Claude (Anthropic), Gemini (Google), DeepSeek
 
 Uso:
     python3 pr-review-insights.py
 
 Requisitos:
     - gh CLI autenticado (gh auth login)
-    - ANTHROPIC_API_KEY exportada no ambiente
+    - Chave de API do provider escolhido
 """
 
 import subprocess
 import json
 import sys
 import os
+import re
 
 
-# ─── Instalação automática do SDK ────────────────────────────────────────────
+# ─── Instalação automática de dependências ────────────────────────────────────
 
-try:
-    import anthropic
-except ImportError:
-    print("Pacote 'anthropic' não encontrado. Instalando...")
+def pip_install(pkg):
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "anthropic", "-q", "--break-system-packages"],
+        [sys.executable, "-m", "pip", "install", pkg, "-q", "--break-system-packages"],
         check=True,
     )
-    import anthropic
 
 
 # ─── Helpers GitHub ──────────────────────────────────────────────────────────
@@ -39,34 +37,27 @@ except ImportError:
 def gh(*args, check=True):
     result = subprocess.run(["gh", *args], capture_output=True, text=True)
     if check and result.returncode != 0:
-        print(f"\nErro ao executar: gh {' '.join(args)}\n{result.stderr.strip()}", file=sys.stderr)
+        print(f"\nErro: gh {' '.join(args)}\n{result.stderr.strip()}", file=sys.stderr)
         sys.exit(1)
     return result.stdout.strip()
 
 
 def get_recent_prs(limit=80):
-    """Busca PRs recentes do usuário autenticado em todos os repos."""
-    raw = gh(
-        "search", "prs",
-        "--author", "@me",
-        "--sort", "updated",
-        "--limit", str(limit),
-        "--json", "number,repository,title,url",
-    )
+    raw = gh("search", "prs", "--author", "@me", "--sort", "updated",
+             "--limit", str(limit), "--json", "number,repository,title,url")
     prs = json.loads(raw) if raw else []
-    # Normaliza: extrai owner e repo de nameWithOwner (ex: "FieldControl/mordor-2")
     for pr in prs:
-        name_with_owner = pr["repository"].get("nameWithOwner", "")
-        if "/" in name_with_owner:
-            owner, repo = name_with_owner.split("/", 1)
+        nwo = pr["repository"].get("nameWithOwner", "")
+        if "/" in nwo:
+            owner, repo = nwo.split("/", 1)
             pr["repository"]["_owner"] = owner
             pr["repository"]["_repo"] = repo
     return prs
 
 
 def get_pr_files_count(owner, repo, number):
-    """Retorna a quantidade de arquivos alterados no PR."""
-    raw = gh("pr", "view", str(number), "--repo", f"{owner}/{repo}", "--json", "files", check=False)
+    raw = gh("pr", "view", str(number), "--repo", f"{owner}/{repo}",
+             "--json", "files", check=False)
     if not raw:
         return 0
     try:
@@ -75,12 +66,8 @@ def get_pr_files_count(owner, repo, number):
         return 0
 
 
-def get_copilot_comments(owner, repo, number):
-    """
-    Coleta todos os comentários do Copilot bot no PR:
-    - Comentários inline (review comments em linhas de código)
-    - Corpo do review (sumário geral do Copilot)
-    """
+def get_review_comments(owner, repo, number):
+    """Coleta comentários de qualquer reviewer — humano ou bot."""
     comments = []
 
     # Comentários inline nas linhas de código
@@ -89,197 +76,318 @@ def get_copilot_comments(owner, repo, number):
     if raw:
         try:
             for c in json.loads(raw):
-                login = c.get("user", {}).get("login", "").lower()
-                if "copilot" in login:
-                    body = c.get("body", "").strip()
-                    if body:
-                        comments.append({
-                            "file": c.get("path", ""),
-                            "line": c.get("original_line") or c.get("line", ""),
-                            "body": body,
-                            "kind": "inline",
-                        })
+                body = c.get("body", "").strip()
+                if body and len(body.splitlines()) > 2:
+                    comments.append({
+                        "file": c.get("path", ""),
+                        "line": c.get("original_line") or c.get("line", ""),
+                        "body": body,
+                        "author": c.get("user", {}).get("login", ""),
+                        "kind": "inline",
+                    })
         except json.JSONDecodeError:
             pass
 
-    # Corpo completo do review (sumário)
+    # Corpo dos reviews (sumários)
     raw = gh("api", f"/repos/{owner}/{repo}/pulls/{number}/reviews",
              "--paginate", check=False)
     if raw:
         try:
             for r in json.loads(raw):
-                login = r.get("user", {}).get("login", "").lower()
-                if "copilot" in login:
-                    body = r.get("body", "").strip()
-                    if body:
-                        comments.append({
-                            "file": "sumário do review",
-                            "line": "",
-                            "body": body,
-                            "kind": "review_summary",
-                        })
+                body = r.get("body", "").strip()
+                if body and len(body.splitlines()) > 2:
+                    comments.append({
+                        "file": "sumário do review",
+                        "line": "",
+                        "body": body,
+                        "author": r.get("user", {}).get("login", ""),
+                        "kind": "review_summary",
+                    })
         except json.JSONDecodeError:
             pass
 
     return comments
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# Arquivos irrelevantes para review
+_SKIP_RE = re.compile(
+    r"(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|\.lock$|"
+    r"\.min\.js|\.min\.css|dist/|\.generated\.|__generated__|"
+    r"\.snap$|coverage/|\.map$)",
+    re.IGNORECASE,
+)
 
-def main():
-    # Pré-checks
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("Erro: variável de ambiente ANTHROPIC_API_KEY não está definida.", file=sys.stderr)
-        print("Execute: export ANTHROPIC_API_KEY='sua-chave'", file=sys.stderr)
-        sys.exit(1)
 
-    if subprocess.run(["which", "gh"], capture_output=True).returncode != 0:
-        print("Erro: gh CLI não encontrado. Instale em https://cli.github.com/", file=sys.stderr)
-        sys.exit(1)
+def get_pr_diff(owner, repo, number, max_lines_per_file=120, max_total_chars=90_000):
+    """Busca o diff do PR com truncagem inteligente."""
+    raw = gh("pr", "diff", str(number), "--repo", f"{owner}/{repo}", check=False)
+    if not raw:
+        return ""
 
-    # ── Etapa 1: buscar PRs recentes ─────────────────────────────────────────
-    print("\n🔍 Buscando seus PRs recentes...")
-    recent_prs = get_recent_prs(limit=80)
-    if not recent_prs:
-        print("Nenhum PR encontrado.")
-        sys.exit(0)
-    print(f"   {len(recent_prs)} PRs encontrados. Filtrando os com >3 arquivos alterados...\n")
+    file_chunks = re.split(r"(?=^diff --git )", raw, flags=re.MULTILINE)
+    result_parts = []
+    total_chars = 0
 
-    # ── Etapa 2: filtrar PRs com mais de 3 arquivos ──────────────────────────
-    qualifying = []
-    for pr in recent_prs:
-        if len(qualifying) >= 10:
-            break
-
-        repo_info = pr.get("repository", {})
-        owner = repo_info.get("_owner", "")
-        repo  = repo_info.get("_repo", "") or repo_info.get("name", "")
-        number = pr["number"]
-
-        if not owner or not repo:
+    for chunk in file_chunks:
+        if not chunk.strip():
             continue
 
-        n_files = get_pr_files_count(owner, repo, number)
-        mark = "✓" if n_files > 3 else "✗"
-        print(f"   {mark}  {owner}/{repo}#{number}  ({n_files} arquivos)  {pr['title'][:55]}")
+        m = re.search(r"^diff --git a/(.+?) b/", chunk, re.MULTILINE)
+        filename = m.group(1) if m else ""
 
-        if n_files > 3:
-            qualifying.append({
-                "owner":  owner,
-                "repo":   repo,
-                "number": number,
-                "title":  pr["title"],
-                "url":    pr["url"],
-            })
+        if filename and _SKIP_RE.search(filename):
+            result_parts.append(f"diff --git a/{filename} b/{filename}\n[arquivo ignorado]\n")
+            continue
 
-    if not qualifying:
-        print("\nNenhum PR com mais de 3 arquivos alterados encontrado nos últimos 80 PRs.")
-        sys.exit(0)
+        lines = chunk.splitlines()
+        if len(lines) > max_lines_per_file:
+            omitted = len(lines) - max_lines_per_file
+            lines = lines[:max_lines_per_file] + [f"... [{omitted} linhas omitidas]"]
 
-    # ── Etapa 3: coletar comentários do Copilot ──────────────────────────────
-    print(f"\n📋 Coletando reviews do Copilot de {len(qualifying)} PRs...\n")
+        part = "\n".join(lines) + "\n"
+        if total_chars + len(part) > max_total_chars:
+            result_parts.append("\n[diff truncado — limite de tamanho atingido]\n")
+            break
 
-    all_feedback = []
-    for pr in qualifying:
-        owner, repo, number = pr["owner"], pr["repo"], pr["number"]
-        print(f"   Lendo {owner}/{repo}#{number}...")
+        result_parts.append(part)
+        total_chars += len(part)
 
-        comments = get_copilot_comments(owner, repo, number)
+    return "".join(result_parts)
 
-        # Manter apenas comentários com mais de 5 linhas
-        significant = [
-            c for c in comments
-            if len(c["body"].splitlines()) > 5
-        ]
 
-        if significant:
-            all_feedback.append({**pr, "comments": significant})
-            print(f"      → {len(significant)} comentário(s) significativo(s) encontrado(s)")
-        else:
-            skipped = len(comments)
-            if skipped:
-                print(f"      → {skipped} comentário(s) encontrado(s), mas nenhum com >10 linhas")
-            else:
-                print("      → Sem comentários do Copilot")
+# ─── Prompt ──────────────────────────────────────────────────────────────────
 
-    if not all_feedback:
-        print("\nNenhum comentário do Copilot com mais de 10 linhas encontrado.")
-        print("Dica: verifique se o Copilot Code Review está ativo nos seus repositórios.")
-        sys.exit(0)
-
-    total_comments = sum(len(f["comments"]) for f in all_feedback)
-    print(f"\n✅ {total_comments} comentário(s) coletado(s) de {len(all_feedback)} PR(s).")
-
-    # ── Etapa 4: montar prompt ───────────────────────────────────────────────
-    feedback_text = ""
+def build_prompt(all_feedback):
+    prs_text = ""
     for item in all_feedback:
-        feedback_text += f"\n---\n## PR: `{item['owner']}/{item['repo']}#{item['number']}`\n"
-        feedback_text += f"**Título:** {item['title']}\n"
-        feedback_text += f"**URL:** {item['url']}\n\n"
-        for i, c in enumerate(item["comments"], 1):
-            loc = f"`{c['file']}`" + (f" linha {c['line']}" if c["line"] else "")
-            feedback_text += f"### Comentário {i} — {loc}\n"
-            feedback_text += c["body"] + "\n\n"
+        prs_text += f"\n---\n## PR `{item['owner']}/{item['repo']}#{item['number']}` — {item['title']}\n"
+        prs_text += f"URL: {item['url']}\n\n"
 
-    prompt = f"""Analise os seguintes comentários de code review feitos pelo **GitHub Copilot** \
-nos meus Pull Requests recentes. Esses comentários foram filtrados para incluir apenas os \
-mais detalhados (>10 linhas), portanto são os feedbacks mais ricos e relevantes.
+        if item["comments"]:
+            prs_text += "### Comentários de review\n\n"
+            for i, c in enumerate(item["comments"], 1):
+                loc = f"`{c['file']}`" + (f" linha {c['line']}" if c["line"] else "")
+                prs_text += f"**[{i}] @{c['author']} — {loc}**\n{c['body']}\n\n"
+        else:
+            prs_text += "_Sem comentários de review._\n\n"
 
-{feedback_text}
+        if item["diff"]:
+            prs_text += "### Diff do PR\n\n```diff\n"
+            prs_text += item["diff"]
+            prs_text += "```\n\n"
+
+    return f"""Você é um engenheiro sênior fazendo análise de code review. Analise os PRs abaixo com honestidade e objetividade. Responda em português.
+
+{prs_text}
 
 ---
 
-Com base nesses comentários, faça uma análise profunda e honesta. Responda em português e \
-seja direto — sem eufemismos, fale claramente sobre os problemas encontrados.
+## 1. Validação dos comentários de review
+Para cada comentário listado, classifique como **válido**, **dispensável** ou **debatível** — com explicação curta do porquê. Ignore comentários puramente de estilo sem impacto real.
 
-## 1. Padrões de Problemas Recorrentes
-Identifique os tipos de problemas que se repetem. Agrupe por categoria \
-(ex: segurança, performance, legibilidade, arquitetura, tratamento de erros, testes).
+## 2. Code review do diff
+Revise o código alterado. Aponte **apenas** o que realmente importa:
+- Bugs reais ou potenciais
+- Problemas de segurança
+- Falhas sérias de design ou arquitetura
+- Problemas graves de performance
 
-## 2. Principais Débitos Técnicos
-Liste os débitos técnicos mais críticos presentes no código, com impacto estimado \
-em manutenibilidade, segurança ou escalabilidade.
+Não comente: estilo, naming subjetivo, preferências pessoais, coisas que "poderiam ser melhores mas funcionam bem". Seja cirúrgico — se não tem nada crítico, diga isso.
 
-## 3. Meus Pontos Fracos como Programador
-Com base nos padrões identificados, seja honesto sobre onde estão minhas lacunas técnicas.
-
-## 4. Dicas Práticas e Acionáveis
-Para cada ponto fraco, dê uma dica concreta do que posso fazer diferente \
-a partir de agora — algo que eu possa aplicar no próximo PR.
-
-## 5. O que Estudar
-Liste tópicos específicos, conceitos, padrões de design, livros, artigos ou \
-recursos para pesquisar. Seja específico (ex: "Clean Code cap. 3 — Funções", \
-"OWASP Top 10 — Injection", "Padrão Repository em DDD") em vez de genérico.
+## 3. Padrões e insights
+Com base em tudo que viu:
+- Quais problemas se repetem? (agrupe por categoria)
+- Quais são os débitos técnicos mais críticos?
+- Onde estão as lacunas técnicas mais relevantes?
+- Dicas práticas e acionáveis para os próximos PRs
+- O que estudar (específico: conceito, recurso, capítulo de livro — sem genéricos)
 """
 
-    # ── Etapa 5: enviar para Claude com streaming ────────────────────────────
-    from datetime import datetime
 
-    print(f"\n{'─' * 70}")
-    print("🤖 Análise do Claude Opus 4.6")
-    print(f"{'─' * 70}\n")
+# ─── Providers ───────────────────────────────────────────────────────────────
 
-    client = anthropic.Anthropic()
-    result_chunks = []
+def run_claude(prompt, api_key):
+    try:
+        import anthropic
+    except ImportError:
+        pip_install("anthropic")
+        import anthropic
 
+    client = anthropic.Anthropic(api_key=api_key)
+    chunks = []
     with client.messages.stream(
         model="claude-opus-4-6",
         max_tokens=8096,
-        thinking={"type": "adaptive"},
         messages=[{"role": "user", "content": prompt}],
     ) as stream:
         for text in stream.text_stream:
             print(text, end="", flush=True)
-            result_chunks.append(text)
+            chunks.append(text)
+    return "".join(chunks)
+
+
+def run_gemini(prompt, api_key):
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        pip_install("google-generativeai")
+        import google.generativeai as genai
+
+    genai.configure(api_key=api_key)
+
+    for model_name in ("gemini-2.5-pro-preview-03-25", "gemini-2.5-pro", "gemini-1.5-pro"):
+        try:
+            model = genai.GenerativeModel(model_name)
+            print(f"   Modelo: {model_name}\n")
+            response = model.generate_content(prompt, stream=True)
+            chunks = []
+            for chunk in response:
+                text = chunk.text or ""
+                print(text, end="", flush=True)
+                chunks.append(text)
+            return "".join(chunks)
+        except Exception as e:
+            print(f"   {model_name} indisponível: {e}")
+
+    print("Erro: nenhum modelo Gemini disponível.", file=sys.stderr)
+    sys.exit(1)
+
+
+def run_deepseek(prompt, api_key):
+    try:
+        from openai import OpenAI
+    except ImportError:
+        pip_install("openai")
+        from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    chunks = []
+    stream = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": prompt}],
+        stream=True,
+        max_tokens=8000,
+    )
+    for chunk in stream:
+        text = chunk.choices[0].delta.content or ""
+        print(text, end="", flush=True)
+        chunks.append(text)
+    return "".join(chunks)
+
+
+# ─── Seleção de provider ─────────────────────────────────────────────────────
+
+PROVIDERS = {
+    "1": {
+        "name": "Claude Opus  (Anthropic)",
+        "env":  "ANTHROPIC_API_KEY",
+        "fn":   run_claude,
+        "hint": "export ANTHROPIC_API_KEY='sk-ant-...'  # console.anthropic.com",
+    },
+    "2": {
+        "name": "Gemini 2.5 Pro  (Google AI Studio — gratuito)",
+        "env":  "GEMINI_API_KEY",
+        "fn":   run_gemini,
+        "hint": "export GEMINI_API_KEY='AIza...'  # aistudio.google.com",
+    },
+    "3": {
+        "name": "DeepSeek V3  (DeepSeek — gratuito)",
+        "env":  "DEEPSEEK_API_KEY",
+        "fn":   run_deepseek,
+        "hint": "export DEEPSEEK_API_KEY='sk-...'  # platform.deepseek.com",
+    },
+}
+
+
+def select_provider():
+    print("\nEscolha o provider de IA:\n")
+    for key, p in PROVIDERS.items():
+        status = "✓" if os.environ.get(p["env"]) else "✗ sem chave"
+        print(f"  [{key}] {p['name']}")
+        print(f"        {p['env']}  {status}")
+    print()
+
+    while True:
+        choice = input("Opção [1/2/3]: ").strip()
+        if choice in PROVIDERS:
+            p = PROVIDERS[choice]
+            api_key = os.environ.get(p["env"])
+            if not api_key:
+                print(f"\n✗ {p['env']} não encontrada.")
+                print(f"  {p['hint']}\n")
+                sys.exit(1)
+            print(f"\n✓ Usando: {p['name']}\n")
+            return p["fn"], api_key
+        print("  Digite 1, 2 ou 3.")
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    if subprocess.run(["which", "gh"], capture_output=True).returncode != 0:
+        print("Erro: gh CLI não encontrado. Instale em https://cli.github.com/", file=sys.stderr)
+        sys.exit(1)
+
+    run_fn, api_key = select_provider()
+
+    # ── Etapa 1: PRs recentes ─────────────────────────────────────────────────
+    print("🔍 Buscando seus PRs recentes...")
+    recent_prs = get_recent_prs(limit=80)
+    if not recent_prs:
+        print("Nenhum PR encontrado.")
+        sys.exit(0)
+    print(f"   {len(recent_prs)} PRs encontrados. Filtrando os com >3 arquivos...\n")
+
+    # ── Etapa 2: filtra PRs ───────────────────────────────────────────────────
+    qualifying = []
+    for pr in recent_prs:
+        if len(qualifying) >= 10:
+            break
+        repo_info = pr.get("repository", {})
+        owner  = repo_info.get("_owner", "")
+        repo   = repo_info.get("_repo", "") or repo_info.get("name", "")
+        number = pr["number"]
+        if not owner or not repo:
+            continue
+        n_files = get_pr_files_count(owner, repo, number)
+        mark = "✓" if n_files > 3 else "✗"
+        print(f"   {mark}  {owner}/{repo}#{number}  ({n_files} arquivos)  {pr['title'][:55]}")
+        if n_files > 3:
+            qualifying.append({"owner": owner, "repo": repo, "number": number,
+                                "title": pr["title"], "url": pr["url"]})
+
+    if not qualifying:
+        print("\nNenhum PR com mais de 3 arquivos encontrado nos últimos 80 PRs.")
+        sys.exit(0)
+
+    # ── Etapa 3: comentários + diff ───────────────────────────────────────────
+    print(f"\n📋 Coletando reviews e diffs de {len(qualifying)} PRs...\n")
+    all_feedback = []
+    for pr in qualifying:
+        owner, repo, number = pr["owner"], pr["repo"], pr["number"]
+        print(f"   {owner}/{repo}#{number}  '{pr['title'][:50]}'")
+        comments = get_review_comments(owner, repo, number)
+        diff     = get_pr_diff(owner, repo, number)
+        all_feedback.append({**pr, "comments": comments, "diff": diff})
+        print(f"      → {len(comments)} comentário(s) | diff: {len(diff):,} chars")
+
+    # ── Etapa 4: envia para a IA ──────────────────────────────────────────────
+    prompt = build_prompt(all_feedback)
+    total_comments = sum(len(f["comments"]) for f in all_feedback)
+
+    print(f"\n{'─' * 70}")
+    print(f"🤖  {len(all_feedback)} PR(s) | {total_comments} comentário(s)")
+    print(f"{'─' * 70}\n")
+
+    result = run_fn(prompt, api_key)
 
     print(f"\n\n{'─' * 70}\n")
 
-    # ── Etapa 6: salvar resultado ─────────────────────────────────────────────
+    # ── Etapa 5: salva resultado ──────────────────────────────────────────────
+    from datetime import datetime
     output_dir = os.path.expanduser("~/pr-insights")
     os.makedirs(output_dir, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp  = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_path = os.path.join(output_dir, f"insights_{timestamp}.md")
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -290,9 +398,9 @@ recursos para pesquisar. Seja específico (ex: "Clean Code cap. 3 — Funções"
         for item in all_feedback:
             f.write(f"- [{item['owner']}/{item['repo']}#{item['number']}]({item['url']}) — {item['title']}\n")
         f.write("\n---\n\n")
-        f.write("".join(result_chunks))
+        f.write(result)
 
-    print(f"💾 Resultado salvo em: {output_path}\n")
+    print(f"💾 Salvo em: {output_path}\n")
 
 
 if __name__ == "__main__":
